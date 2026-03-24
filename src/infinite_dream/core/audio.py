@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
+
+from infinite_dream.utils.ffmpeg import ffmpeg_available, run_ffmpeg
 
 
 class AudioError(Exception):
@@ -12,7 +12,7 @@ class AudioError(Exception):
 
 
 def _require_ffmpeg() -> None:
-    if not shutil.which("ffmpeg"):
+    if not ffmpeg_available():
         raise AudioError(
             "ffmpeg is not installed or not on PATH. "
             "Install it (e.g. `brew install ffmpeg`) before processing audio."
@@ -20,10 +20,15 @@ def _require_ffmpeg() -> None:
 
 
 def _run(cmd: list[str]) -> None:
-    """Run a command and raise :class:`AudioError` on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise AudioError(f"Command failed (rc={result.returncode}): {result.stderr[:500]}")
+    """Run a command via :func:`run_ffmpeg` and raise :class:`AudioError` on failure."""
+    try:
+        # Build args from the full command: strip the leading "ffmpeg" if present
+        args = cmd[1:] if cmd and cmd[0] == "ffmpeg" else cmd
+        # Remove -y if present (run_ffmpeg adds it automatically)
+        args = [a for a in args if a != "-y"]
+        run_ffmpeg(args)
+    except Exception as exc:
+        raise AudioError(str(exc)) from exc
 
 
 class AudioMixer:
@@ -86,7 +91,6 @@ class AudioMixer:
         """
         _require_ffmpeg()
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        delay_sec = shift_ms / 1000.0
         _run([
             "ffmpeg", "-y",
             "-i", audio,
@@ -127,6 +131,57 @@ class AudioMixer:
         ])
         return output_path
 
+    # ── New methods ───────────────────────────────
+
+    def merge_audio_video(
+        self,
+        video_path: str,
+        audio_path: str,
+        output_path: str,
+    ) -> str:
+        """Merge processed *audio_path* back into *video_path*.
+
+        The video stream is copied as-is; the audio stream is replaced with
+        the provided audio file.
+
+        Returns *output_path* on success.
+        """
+        _require_ffmpeg()
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        _run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            output_path,
+        ])
+        return output_path
+
+    @staticmethod
+    def generate_silence(duration_sec: float, output_path: str) -> str:
+        """Generate a silent audio file of *duration_sec* seconds.
+
+        Useful for segments that have no audio track (e.g. AI-generated video
+        clips with no sound).
+
+        Returns *output_path* on success.
+        """
+        _require_ffmpeg()
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        _run([
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", f"anullsrc=r=44100:cl=stereo:d={duration_sec}",
+            "-t", str(duration_sec),
+            "-acodec", "pcm_s16le",
+            output_path,
+        ])
+        return output_path
+
     # ── Full pipeline ─────────────────────────────
 
     def process_full(
@@ -137,28 +192,45 @@ class AudioMixer:
     ) -> str:
         """Run the complete audio post-processing pipeline.
 
-        1. Extract audio from the composed *video_path*.
-        2. For each segment, extract its individual audio to allow future
-           per-segment processing (e.g. TTS alignment).
-        3. Output the final processed audio to *output_path*.
+        1. Extract audio from each segment video.
+        2. Cross-fade consecutive audio segments using ``self.crossfade_duration``.
+        3. Merge the processed audio back into the composed *video_path*.
 
-        Currently this is a straightforward extraction.  BGM ducking,
-        shift-blend, and crossfade should be driven by higher-level
-        orchestration once TTS and music generation are wired.
+        Returns *output_path* on success.
         """
         _require_ffmpeg()
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Extract the main composed audio
-        self.extract_audio(video_path, output_path)
+        if not segment_video_paths:
+            # Nothing to process — just extract the main audio
+            self.extract_audio(video_path, output_path)
+            return output_path
 
-        # Optionally extract per-segment audio for downstream use
+        # Step 1: Extract audio from each segment
+        seg_audios: list[str] = []
         for i, seg_path in enumerate(segment_video_paths):
-            seg_audio = str(Path(output_path).parent / f"segment_{i:03d}.wav")
+            seg_audio = str(out_dir / f"segment_{i:03d}.wav")
             try:
                 self.extract_audio(seg_path, seg_audio)
+                seg_audios.append(seg_audio)
             except AudioError:
-                # Non-fatal — some mock segments may have no real audio
-                pass
+                # Segment may have no audio — generate silence as fallback
+                silence_path = str(out_dir / f"segment_{i:03d}_silence.wav")
+                self.generate_silence(8.0, silence_path)
+                seg_audios.append(silence_path)
+
+        # Step 2: Crossfade consecutive segments
+        if len(seg_audios) == 1:
+            merged_audio = seg_audios[0]
+        else:
+            merged_audio = seg_audios[0]
+            for i in range(1, len(seg_audios)):
+                next_merged = str(out_dir / f"crossfade_{i:03d}.wav")
+                self.crossfade(merged_audio, seg_audios[i], self.crossfade_duration, next_merged)
+                merged_audio = next_merged
+
+        # Step 3: Merge the processed audio back into the video
+        self.merge_audio_video(video_path, merged_audio, output_path)
 
         return output_path
