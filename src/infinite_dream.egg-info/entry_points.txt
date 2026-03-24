@@ -1,0 +1,2 @@
+[console_scripts]
+infinite-dream = infinite_dream.cli:main
