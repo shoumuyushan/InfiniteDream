@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from infinite_dream.adapters.base import LLMAdapter
-from infinite_dream.adapters.llm import OpenAILLMAdapter
+from infinite_dream.adapters.factory import create_llm_adapter, create_video_adapter
 from infinite_dream.config import AppConfig
 from infinite_dream.core.enhancer import ScriptEnhancer
 from infinite_dream.core.extractor import CharacterExtractor, SceneExtractor
@@ -175,20 +175,12 @@ class PromptBuildStage(Stage):
 def build_default_pipeline(config: AppConfig) -> Pipeline:
     """Construct a Pipeline with all text-processing stages.
 
-    Uses the provided AppConfig to select and configure the LLM adapter.
+    Uses the provided AppConfig to select and configure adapters via the
+    adapter factory, which automatically falls back to mock adapters when
+    no API key is configured.
     """
-    llm: LLMAdapter
-    if config.llm.api_key:
-        llm = OpenAILLMAdapter(
-            api_key=config.llm.api_key,
-            model=config.llm.model,
-            base_url=config.llm.base_url,
-        )
-    else:
-        # Fallback to mock for development / testing
-        from infinite_dream.adapters.llm import MockLLMAdapter
-
-        llm = MockLLMAdapter()
+    llm = create_llm_adapter(config.llm)
+    _video = create_video_adapter(config.video)  # noqa: F841 — used in later phases
 
     stages: list[Stage] = [
         ScriptParseStage(),
