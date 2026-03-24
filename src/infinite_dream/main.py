@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -26,6 +27,14 @@ app = FastAPI(
     title="InfiniteDream",
     description="AI-driven long-form video production engine",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # In-memory project store (demo mode)
@@ -55,12 +64,52 @@ class ProjectSummary(BaseModel):
     style: str | None
 
 
+class ProviderConfig(BaseModel):
+    """API provider configuration from UI."""
+
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4o"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    video_provider: str = "kling"
+    video_api_key: str = ""
+    video_base_url: str = ""
+
+
 # ── API Routes ──
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/config")
+async def update_config(config: ProviderConfig) -> dict:
+    """Update runtime configuration."""
+    global _config
+    _config.llm.provider = config.llm_provider
+    _config.llm.model = config.llm_model
+    _config.llm.api_key = config.llm_api_key
+    _config.llm.base_url = config.llm_base_url or None
+    _config.video.provider = config.video_provider
+    _config.video.api_key = config.video_api_key
+    _config.video.base_url = config.video_base_url
+    return {"status": "ok", "message": "Configuration updated"}
+
+
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Get current configuration (mask secrets)."""
+    return {
+        "llm_provider": _config.llm.provider,
+        "llm_model": _config.llm.model,
+        "llm_api_key": "***" + _config.llm.api_key[-4:] if len(_config.llm.api_key) > 4 else "",
+        "llm_base_url": _config.llm.base_url or "",
+        "video_provider": _config.video.provider,
+        "video_api_key": "***" + _config.video.api_key[-4:] if len(_config.video.api_key) > 4 else "",
+        "video_base_url": _config.video.base_url,
+    }
 
 
 @app.get("/api/styles")
